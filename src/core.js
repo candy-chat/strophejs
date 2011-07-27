@@ -804,7 +804,7 @@ Strophe = {
                     break;
                   case Strophe.ElementType.TEXT:
                     // text element to escape values
-                    result += Strophe.xmlescape(child.nodeValue);
+                    result += child.nodeValue;
                     break;
                   case Strophe.ElementType.CDATA:
                     // cdata section so don't escape values
