@@ -2664,9 +2664,9 @@ Strophe.Connection.prototype = {
         } else if (do_sasl_plain) {
             // Build the plain auth string (barejid null
             // username null password) and base 64 encoded.
-            auth_str = Strophe.getBareJidFromJid(this.jid);
+            auth_str = unescape(encodeURIComponent(Strophe.getBareJidFromJid(this.jid)));
             auth_str = auth_str + "\u0000";
-            auth_str = auth_str + Strophe.getNodeFromJid(this.jid);
+            auth_str = auth_str + unescape(encodeURIComponent(Strophe.getNodeFromJid(this.jid)));
             auth_str = auth_str + "\u0000";
             auth_str = auth_str + this.pass;
 
@@ -2747,14 +2747,14 @@ Strophe.Connection.prototype = {
             digest_uri = digest_uri + "/" + host;
         }
 
-        var A1 = MD5.hash(Strophe.getNodeFromJid(this.jid) +
+        var A1 = MD5.hash(unescape(encodeURIComponent(Strophe.getNodeFromJid(this.jid))) +
                           ":" + realm + ":" + this.pass) +
             ":" + nonce + ":" + cnonce;
         var A2 = 'AUTHENTICATE:' + digest_uri;
 
         var responseText = "";
         responseText += 'username=' +
-            this._quote(Strophe.getNodeFromJid(this.jid)) + ',';
+            this._quote(unescape(encodeURIComponent(Strophe.getNodeFromJid(this.jid)))) + ',';
         responseText += 'realm=' + this._quote(realm) + ',';
         responseText += 'nonce=' + this._quote(nonce) + ',';
         responseText += 'cnonce=' + this._quote(cnonce) + ',';
