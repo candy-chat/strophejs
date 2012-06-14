@@ -2455,15 +2455,7 @@ Strophe.Connection.prototype = {
         }
         if (!found_authentication) {
             _callback = _callback || this._connect_cb;
-            // we didn't get stream:features yet, so we need wait for it
-            // by sending a blank poll request
-            var body = this._buildBody();
-            this._requests.push(
-                new Strophe.Request(body.tree(),
-                                    this._onRequestStateChange.bind(
-                                        this, _callback.bind(this)),
-                                    body.tree().getAttribute("rid")));
-            this._throttledRequestHandler();
+            this.po.onNotFoundAuthentication(_callback);
             return;
         }
         if (this.do_authentication !== false)
@@ -3247,6 +3239,19 @@ Strophe.Bosh.prototype = {
 
         return bodyWrap;
     },
+    
+    onNotFoundAuthentication: function(callback) {
+        // we didn't get stream:features yet, so we need wait for it
+        // by sending a blank poll request
+        var body = this._buildBody();
+        this._requests.push(
+            new Strophe.Request(body.tree(),
+                                this._onRequestStateChange.bind(
+                                    this, callback.bind(this)),
+                                body.tree().getAttribute("rid")));
+        this._throttledRequestHandler();
+        
+    },
 
 
     /** PrivateFunction: _onDisconnectTimeout
@@ -3796,6 +3801,8 @@ Strophe.Websocket.prototype = {
 
         this._c._dataRecv(elem);
     },
+    
+    onNotFoundAuthentication: function(callback) {},
 
     /** PrivateFunction: _connect_cb_wrapper
      * _Private_ function that handles the first connection messages
