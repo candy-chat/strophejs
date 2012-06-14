@@ -329,6 +329,15 @@ Strophe = {
         FRAGMENT: 11
     },
 
+    /**
+     *
+     *
+     */
+    ProtocolType: {
+        BOSH: 1,
+        WEBSOCKET: 2
+    },
+
     /** PrivateConstants: Timeout Values
      *  Timeout values for error states.  These values are in seconds.
      *  These should not be changed unless you know exactly what you are
@@ -1600,15 +1609,17 @@ Strophe.Connection = function (service)
 {
     /* The path to the httpbind service. */
     this.service = service;
+    if (service.indexOf("ws") === 0) {
+        this.protocol = Strophe.ProtocolType.WEBSOCKET;
+        this.po = new Strophe.Websocket(this);
+    } else {
+        this.protocol = Strophe.ProtocolType.BOSH;
+        this.po = new Strophe.Bosh(this);
+    }
     /* The connected JID. */
     this.jid = "";
     /* the JIDs domain */
     this.domain = null;
-    /* request id for body tags */
-    this.rid = Math.floor(Math.random() * 4294967295);
-    /* The current session ID. */
-    this.sid = null;
-    this.streamId = null;
     /* stream:features */
     this.features = null;
 
@@ -1638,13 +1649,7 @@ Strophe.Connection = function (service)
 
     this.paused = false;
 
-    // default BOSH values
-    this.hold = 1;
-    this.wait = 60;
-    this.window = 5;
-
     this._data = [];
-    this._requests = [];
     this._uniqueId = Math.round(Math.random() * 10000);
 
     this._sasl_success_handler = null;
@@ -1682,7 +1687,6 @@ Strophe.Connection.prototype = {
         this.rid = Math.floor(Math.random() * 4294967295);
 
         this.sid = null;
-        this.streamId = null;
 
         // SASL
         this.do_session = false;
@@ -1800,41 +1804,12 @@ Strophe.Connection.prototype = {
         this.authenticated = false;
         this.errors = 0;
 
-        this.wait = wait || this.wait;
-        this.hold = hold || this.hold;
-
         // parse jid for domain and resource
         this.domain = this.domain || Strophe.getDomainFromJid(this.jid);
 
-        // build the body tag
-        var body = this._buildBody().attrs({
-            to: this.domain,
-            "xml:lang": "en",
-            wait: this.wait,
-            hold: this.hold,
-            content: "text/xml; charset=utf-8",
-            ver: "1.6",
-            "xmpp:version": "1.0",
-            "xmlns:xmpp": Strophe.NS.BOSH
-        });
-
-		if(route){
-			body.attrs({
-				route: route
-			});
-		}
-
         this._changeConnectStatus(Strophe.Status.CONNECTING, null);
 
-        var _connect_cb = this._connect_callback || this._connect_cb;
-        this._connect_callback = null;
-
-        this._requests.push(
-            new Strophe.Request(body.tree(),
-                                this._onRequestStateChange.bind(
-                                    this, _connect_cb.bind(this)),
-                                body.tree().getAttribute("rid")));
-        this._throttledRequestHandler();
+        this.po.connect(wait, hold, route)
     },
 
     /** Function: attach
@@ -1973,9 +1948,7 @@ Strophe.Connection.prototype = {
             this._queueData(elem);
         }
 
-        this._throttledRequestHandler();
-        clearTimeout(this._idleTimeout);
-        this._idleTimeout = setTimeout(this._onIdle.bind(this), 100);
+        this.po.send();
     },
 
     /** Function: flush
@@ -2015,54 +1988,54 @@ Strophe.Connection.prototype = {
         if (typeof(elem.tree) === "function") {
             elem = elem.tree();
         }
-	var id = elem.getAttribute('id');
+        var id = elem.getAttribute('id');
 
-	// inject id if not found
-	if (!id) {
-	    id = this.getUniqueId("sendIQ");
-	    elem.setAttribute("id", id);
-	}
+        // inject id if not found
+        if (!id) {
+            id = this.getUniqueId("sendIQ");
+            elem.setAttribute("id", id);
+        }
 
-	var handler = this.addHandler(function (stanza) {
-	    // remove timeout handler if there is one
+        var handler = this.addHandler(function (stanza) {
+            // remove timeout handler if there is one
             if (timeoutHandler) {
                 that.deleteTimedHandler(timeoutHandler);
             }
 
             var iqtype = stanza.getAttribute('type');
-	    if (iqtype == 'result') {
-		if (callback) {
+            if (iqtype == 'result') {
+                if (callback) {
                     callback(stanza);
                 }
-	    } else if (iqtype == 'error') {
-		if (errback) {
+            } else if (iqtype == 'error') {
+                if (errback) {
                     errback(stanza);
                 }
-	    } else {
+            } else {
                 throw {
                     name: "StropheError",
-                    message: "Got bad IQ type of " + iqtype
+            message: "Got bad IQ type of " + iqtype
                 };
             }
-	}, null, 'iq', null, id);
+        }, null, 'iq', null, id);
 
-	// if timeout specified, setup timeout handler.
-	if (timeout) {
-	    timeoutHandler = this.addTimedHandler(timeout, function () {
+        // if timeout specified, setup timeout handler.
+        if (timeout) {
+            timeoutHandler = this.addTimedHandler(timeout, function () {
                 // get rid of normal handler
                 that.deleteHandler(handler);
 
-	        // call errback on timeout with null stanza
+                // call errback on timeout with null stanza
                 if (errback) {
-		    errback(null);
+                    errback(null);
                 }
-		return false;
-	    });
-	}
+                return false;
+            });
+        }
 
-	this.send(elem);
+        this.send(elem);
 
-	return id;
+        return id;
     },
 
     /** PrivateFunction: _queueData
@@ -2089,8 +2062,8 @@ Strophe.Connection.prototype = {
     {
         this._data.push("restart");
 
-        this._throttledRequestHandler();
-        clearTimeout(this._idleTimeout);
+        this.po._sendRestart();
+
         this._idleTimeout = setTimeout(this._onIdle.bind(this), 100);
     },
 
@@ -2222,10 +2195,17 @@ Strophe.Connection.prototype = {
 
         Strophe.info("Disconnect was called because: " + reason);
         if (this.connected) {
+            this.disconnecting = true;
+            if (this.authenticated) {
+                var pres = $pres({
+                    xmlns: Strophe.NS.CLIENT,
+                    type: 'unavailable'
+                });
+            }
             // setup timeout handler
             this._disconnectTimeout = this._addSysTimedHandler(
                 3000, this._onDisconnectTimeout.bind(this));
-            this._sendTerminate();
+            this.po.disconnect(pres);
         }
     },
 
@@ -2266,323 +2246,15 @@ Strophe.Connection.prototype = {
         }
     },
 
-    /** PrivateFunction: _buildBody
-     *  _Private_ helper function to generate the <body/> wrapper for BOSH.
-     *
-     *  Returns:
-     *    A Strophe.Builder with a <body/> element.
+    /** PrivateFunction _bodyWrap
+     *  _Private_ helper function to wrap a stanza in a <body> tag.
+     *  This is used so Strophe can process stanzas from WebSockets like BOSH
      */
-    _buildBody: function ()
+    _bodyWrap: function (stanza)
     {
-        var bodyWrap = $build('body', {
-            rid: this.rid++,
+        return $build('body', {
             xmlns: Strophe.NS.HTTPBIND
-        });
-
-        if (this.sid !== null) {
-            bodyWrap.attrs({sid: this.sid});
-        }
-
-        return bodyWrap;
-    },
-
-    /** PrivateFunction: _removeRequest
-     *  _Private_ function to remove a request from the queue.
-     *
-     *  Parameters:
-     *    (Strophe.Request) req - The request to remove.
-     */
-    _removeRequest: function (req)
-    {
-        Strophe.debug("removing request");
-
-        var i;
-        for (i = this._requests.length - 1; i >= 0; i--) {
-            if (req == this._requests[i]) {
-                this._requests.splice(i, 1);
-            }
-        }
-
-        // IE6 fails on setting to null, so set to empty function
-        req.xhr.onreadystatechange = function () {};
-
-        this._throttledRequestHandler();
-    },
-
-    /** PrivateFunction: _restartRequest
-     *  _Private_ function to restart a request that is presumed dead.
-     *
-     *  Parameters:
-     *    (Integer) i - The index of the request in the queue.
-     */
-    _restartRequest: function (i)
-    {
-        var req = this._requests[i];
-        if (req.dead === null) {
-            req.dead = new Date();
-        }
-
-        this._processRequest(i);
-    },
-
-    /** PrivateFunction: _processRequest
-     *  _Private_ function to process a request in the queue.
-     *
-     *  This function takes requests off the queue and sends them and
-     *  restarts dead requests.
-     *
-     *  Parameters:
-     *    (Integer) i - The index of the request in the queue.
-     */
-    _processRequest: function (i)
-    {
-        var req = this._requests[i];
-        var reqStatus = -1;
-
-        try {
-            if (req.xhr.readyState == 4) {
-                reqStatus = req.xhr.status;
-            }
-        } catch (e) {
-            Strophe.error("caught an error in _requests[" + i +
-                          "], reqStatus: " + reqStatus);
-        }
-
-        if (typeof(reqStatus) == "undefined") {
-            reqStatus = -1;
-        }
-
-        // make sure we limit the number of retries
-        if (req.sends > this.maxRetries) {
-            this._onDisconnectTimeout();
-            return;
-        }
-
-        var time_elapsed = req.age();
-        var primaryTimeout = (!isNaN(time_elapsed) &&
-                              time_elapsed > Math.floor(Strophe.TIMEOUT * this.wait));
-        var secondaryTimeout = (req.dead !== null &&
-                                req.timeDead() > Math.floor(Strophe.SECONDARY_TIMEOUT * this.wait));
-        var requestCompletedWithServerError = (req.xhr.readyState == 4 &&
-                                               (reqStatus < 1 ||
-                                                reqStatus >= 500));
-        if (primaryTimeout || secondaryTimeout ||
-            requestCompletedWithServerError) {
-            if (secondaryTimeout) {
-                Strophe.error("Request " +
-                              this._requests[i].id +
-                              " timed out (secondary), restarting");
-            }
-            req.abort = true;
-            req.xhr.abort();
-            // setting to null fails on IE6, so set to empty function
-            req.xhr.onreadystatechange = function () {};
-            this._requests[i] = new Strophe.Request(req.xmlData,
-                                                    req.origFunc,
-                                                    req.rid,
-                                                    req.sends);
-            req = this._requests[i];
-        }
-
-        if (req.xhr.readyState === 0) {
-            Strophe.debug("request id " + req.id +
-                          "." + req.sends + " posting");
-
-            try {
-				var async = !('sync' in this && this.sync === true);
-				req.xhr.open("POST", this.service, async);
-			} catch (e2) {
-                Strophe.error("XHR open failed.");
-                if (!this.connected) {
-                    this._changeConnectStatus(Strophe.Status.CONNFAIL,
-                                              "bad-service");
-                }
-                this.disconnect();
-                return;
-            }
-
-            // Fires the XHR request -- may be invoked immediately
-            // or on a gradually expanding retry window for reconnects
-            var sendFunc = function () {
-                req.date = new Date();
-                req.xhr.send(req.data);
-            };
-
-            // Implement progressive backoff for reconnects --
-            // First retry (send == 1) should also be instantaneous
-            if (req.sends > 1) {
-                // Using a cube of the retry number creates a nicely
-                // expanding retry window
-                var backoff = Math.min(Math.floor(Strophe.TIMEOUT * this.wait),
-                                       Math.pow(req.sends, 3)) * 1000;
-                setTimeout(sendFunc, backoff);
-            } else {
-                sendFunc();
-            }
-
-            req.sends++;
-
-            if (this.xmlOutput !== Strophe.Connection.prototype.xmlOutput) {
-                this.xmlOutput(req.xmlData);
-            }
-            if (this.rawOutput !== Strophe.Connection.prototype.rawOutput) {
-                this.rawOutput(req.data);
-            }
-        } else {
-            Strophe.debug("_processRequest: " +
-                          (i === 0 ? "first" : "second") +
-                          " request has readyState of " +
-                          req.xhr.readyState);
-        }
-    },
-
-    /** PrivateFunction: _throttledRequestHandler
-     *  _Private_ function to throttle requests to the connection window.
-     *
-     *  This function makes sure we don't send requests so fast that the
-     *  request ids overflow the connection window in the case that one
-     *  request died.
-     */
-    _throttledRequestHandler: function ()
-    {
-        if (!this._requests) {
-            Strophe.debug("_throttledRequestHandler called with " +
-                          "undefined requests");
-        } else {
-            Strophe.debug("_throttledRequestHandler called with " +
-                          this._requests.length + " requests");
-        }
-
-        if (!this._requests || this._requests.length === 0) {
-            return;
-        }
-
-        if (this._requests.length > 0) {
-            this._processRequest(0);
-        }
-
-        if (this._requests.length > 1 &&
-            Math.abs(this._requests[0].rid -
-                     this._requests[1].rid) < this.window) {
-            this._processRequest(1);
-        }
-    },
-
-    /** PrivateFunction: _onRequestStateChange
-     *  _Private_ handler for Strophe.Request state changes.
-     *
-     *  This function is called when the XMLHttpRequest readyState changes.
-     *  It contains a lot of error handling logic for the many ways that
-     *  requests can fail, and calls the request callback when requests
-     *  succeed.
-     *
-     *  Parameters:
-     *    (Function) func - The handler for the request.
-     *    (Strophe.Request) req - The request that is changing readyState.
-     */
-    _onRequestStateChange: function (func, req)
-    {
-        Strophe.debug("request id " + req.id +
-                      "." + req.sends + " state changed to " +
-                      req.xhr.readyState);
-
-        if (req.abort) {
-            req.abort = false;
-            return;
-        }
-
-        // request complete
-        var reqStatus;
-        if (req.xhr.readyState == 4) {
-            reqStatus = 0;
-            try {
-                reqStatus = req.xhr.status;
-            } catch (e) {
-                // ignore errors from undefined status attribute.  works
-                // around a browser bug
-            }
-
-            if (typeof(reqStatus) == "undefined") {
-                reqStatus = 0;
-            }
-
-            if (this.disconnecting) {
-                if (reqStatus >= 400) {
-                    this._hitError(reqStatus);
-                    return;
-                }
-            }
-
-            var reqIs0 = (this._requests[0] == req);
-            var reqIs1 = (this._requests[1] == req);
-
-            if ((reqStatus > 0 && reqStatus < 500) || req.sends > 5) {
-                // remove from internal queue
-                this._removeRequest(req);
-                Strophe.debug("request id " +
-                              req.id +
-                              " should now be removed");
-            }
-
-            // request succeeded
-            if (reqStatus == 200) {
-                // if request 1 finished, or request 0 finished and request
-                // 1 is over Strophe.SECONDARY_TIMEOUT seconds old, we need to
-                // restart the other - both will be in the first spot, as the
-                // completed request has been removed from the queue already
-                if (reqIs1 ||
-                    (reqIs0 && this._requests.length > 0 &&
-                     this._requests[0].age() > Math.floor(Strophe.SECONDARY_TIMEOUT * this.wait))) {
-                    this._restartRequest(0);
-                }
-                // call handler
-                Strophe.debug("request id " +
-                              req.id + "." +
-                              req.sends + " got 200");
-                func(req);
-                this.errors = 0;
-            } else {
-                Strophe.error("request id " +
-                              req.id + "." +
-                              req.sends + " error " + reqStatus +
-                              " happened");
-                if (reqStatus === 0 ||
-                    (reqStatus >= 400 && reqStatus < 600) ||
-                    reqStatus >= 12000) {
-                    this._hitError(reqStatus);
-                    if (reqStatus >= 400 && reqStatus < 500) {
-                        this._changeConnectStatus(Strophe.Status.DISCONNECTING,
-                                                  null);
-                        this._doDisconnect();
-                    }
-                }
-            }
-
-            if (!((reqStatus > 0 && reqStatus < 500) ||
-                  req.sends > 5)) {
-                this._throttledRequestHandler();
-            }
-        }
-    },
-
-    /** PrivateFunction: _hitError
-     *  _Private_ function to handle the error count.
-     *
-     *  Requests are resent automatically until their error count reaches
-     *  5.  Each time an error is encountered, this function is called to
-     *  increment the count and disconnect if the count is too high.
-     *
-     *  Parameters:
-     *    (Integer) reqStatus - The request status.
-     */
-    _hitError: function (reqStatus)
-    {
-        this.errors++;
-        Strophe.warn("request errored, status: " + reqStatus +
-                     ", number of errors: " + this.errors);
-        if (this.errors > 4) {
-            this._onDisconnectTimeout();
-        }
+        }).cnode(stanza);
     },
 
     /** PrivateFunction: _doDisconnect
@@ -2596,9 +2268,7 @@ Strophe.Connection.prototype = {
         Strophe.info("_doDisconnect was called");
         this.authenticated = false;
         this.disconnecting = false;
-        this.sid = null;
-        this.streamId = null;
-        this.rid = Math.floor(Math.random() * 4294967295);
+        this.po._doDisconnect();
 
         // tell the parent we disconnected
         if (this.connected) {
@@ -2628,12 +2298,8 @@ Strophe.Connection.prototype = {
      */
     _dataRecv: function (req)
     {
-        try {
-            var elem = req.getResponse();
-        } catch (e) {
-            if (e != "parsererror") { throw e; }
-            this.disconnect("strophe-parsererror");
-        }
+        Strophe.info("_dataRecv called");
+        var elem = this.po.reqToData(req);
         if (elem === null) { return; }
 
         if (this.xmlInput !== Strophe.Connection.prototype.xmlInput) {
@@ -2659,7 +2325,7 @@ Strophe.Connection.prototype = {
         }
 
         // handle graceful disconnect
-        if (this.disconnecting && this._requests.length === 0) {
+        if (this.disconnecting && this.po.emptyQueue()) {
             this.deleteTimedHandler(this._disconnectTimeout);
             this._disconnectTimeout = null;
             this._doDisconnect();
@@ -2716,36 +2382,6 @@ Strophe.Connection.prototype = {
         });
     },
 
-    /** PrivateFunction: _sendTerminate
-     *  _Private_ function to send initial disconnect sequence.
-     *
-     *  This is the first step in a graceful disconnect.  It sends
-     *  the BOSH server a terminate body and includes an unavailable
-     *  presence if authentication has completed.
-     */
-    _sendTerminate: function ()
-    {
-        Strophe.info("_sendTerminate was called");
-        var body = this._buildBody().attrs({type: "terminate"});
-
-        if (this.authenticated) {
-            body.c('presence', {
-                xmlns: Strophe.NS.CLIENT,
-                type: 'unavailable'
-            });
-        }
-
-        this.disconnecting = true;
-
-        var req = new Strophe.Request(body.tree(),
-                                      this._onRequestStateChange.bind(
-                                          this, this._dataRecv.bind(this)),
-                                      body.tree().getAttribute("rid"));
-
-        this._requests.push(req);
-        this._throttledRequestHandler();
-    },
-
     /** PrivateFunction: _connect_cb
      *  _Private_ handler for initial connection request.
      *
@@ -2767,7 +2403,8 @@ Strophe.Connection.prototype = {
         Strophe.info("_connect_cb was called");
 
         this.connected = true;
-        var bodyWrap = req.getResponse();
+
+        var bodyWrap = this.po.reqToData(req);
         if (!bodyWrap) { return; }
 
         if (this.xmlInput !== Strophe.Connection.prototype.xmlInput) {
@@ -2777,37 +2414,7 @@ Strophe.Connection.prototype = {
             this.rawInput(Strophe.serialize(bodyWrap));
         }
 
-        var typ = bodyWrap.getAttribute("type");
-        var cond, conflict;
-        if (typ !== null && typ == "terminate") {
-            // an error occurred
-            cond = bodyWrap.getAttribute("condition");
-            conflict = bodyWrap.getElementsByTagName("conflict");
-            if (cond !== null) {
-                if (cond == "remote-stream-error" && conflict.length > 0) {
-                    cond = "conflict";
-                }
-                this._changeConnectStatus(Strophe.Status.CONNFAIL, cond);
-            } else {
-                this._changeConnectStatus(Strophe.Status.CONNFAIL, "unknown");
-            }
-            return;
-        }
-
-        // check to make sure we don't overwrite these if _connect_cb is
-        // called multiple times in the case of missing stream:features
-        if (!this.sid) {
-            this.sid = bodyWrap.getAttribute("sid");
-        }
-        if (!this.stream_id) {
-            this.stream_id = bodyWrap.getAttribute("authid");
-        }
-        var wind = bodyWrap.getAttribute('requests');
-        if (wind) { this.window = parseInt(wind, 10); }
-        var hold = bodyWrap.getAttribute('hold');
-        if (hold) { this.hold = parseInt(hold, 10); }
-        var wait = bodyWrap.getAttribute('wait');
-        if (wait) { this.wait = parseInt(wait, 10); }
+        this.po._connect_cb(bodyWrap);
 
         this._authentication.sasl_scram_sha1 = false;
         this._authentication.sasl_plain = false;
@@ -3501,16 +3108,7 @@ Strophe.Connection.prototype = {
     {
         Strophe.info("_onDisconnectTimeout was called");
 
-        // cancel all remaining requests and clear the queue
-        var req;
-        while (this._requests.length > 0) {
-            req = this._requests.pop();
-            req.abort = true;
-            req.xhr.abort();
-            // jslint complains, but this is fine. setting to empty func
-            // is necessary for IE6
-            req.xhr.onreadystatechange = function () {};
-        }
+        this.po._onDisconnectTimeout();
 
         // actually disconnect
         this._doDisconnect();
@@ -3564,37 +3162,148 @@ Strophe.Connection.prototype = {
 
         var body, time_elapsed;
 
-        // if no requests are in progress, poll
-        if (this.authenticated && this._requests.length === 0 &&
-            this._data.length === 0 && !this.disconnecting) {
-            Strophe.info("no requests during idle cycle, sending " +
-                         "blank request");
-            this._data.push(null);
+        this.po._onIdle();
+
+        clearTimeout(this._idleTimeout);
+
+        // reactivate the timer only if connected
+        if (this.connected) {
+            this._idleTimeout = setTimeout(this._onIdle.bind(this), 100);
+        }
+    }
+};
+
+Strophe.Bosh = function(connection) {
+    this._c = connection;
+    /* request id for body tags */
+    this.rid = Math.floor(Math.random() * 4294967295);
+    /* The current session ID. */
+    this.sid = null;
+
+    // default BOSH values
+    this.hold = 1;
+    this.wait = 60;
+    this.window = 5;
+
+    this._requests = [];
+}
+
+Strophe.Bosh.prototype = {
+    connect: function (wait, hold, route)
+    {
+        this.wait = wait || this.wait;
+        this.hold = hold || this.hold;
+
+        // build the body tag
+        var body = this._buildBody().attrs({
+            to: this._c.domain,
+            "xml:lang": "en",
+            wait: this.wait,
+            hold: this.hold,
+            content: "text/xml; charset=utf-8",
+            ver: "1.6",
+            "xmpp:version": "1.0",
+            "xmlns:xmpp": Strophe.NS.BOSH
+        });
+
+        if(route){
+            body.attrs({
+                route: route
+            });
         }
 
-        if (this._requests.length < 2 && this._data.length > 0 &&
-            !this.paused) {
+        var _connect_cb = this._c._connect_cb;
+
+        this._requests.push(
+            new Strophe.Request(body.tree(),
+                                this._onRequestStateChange.bind(
+                                    this, _connect_cb.bind(this._c)),
+                                body.tree().getAttribute("rid")));
+        this._throttledRequestHandler();
+    },
+
+    send: function () {
+        this._throttledRequestHandler();
+        clearTimeout(this._c._idleTimeout);
+        this._c._idleTimeout = setTimeout(this._c._onIdle.bind(this._c), 100);
+    },
+
+    /** PrivateFunction: _buildBody
+     *  _Private_ helper function to generate the <body/> wrapper for BOSH.
+     *
+     *  Returns:
+     *    A Strophe.Builder with a <body/> element.
+     */
+    _buildBody: function ()
+    {
+        var bodyWrap = $build('body', {
+            rid: this.rid++,
+            xmlns: Strophe.NS.HTTPBIND
+        });
+
+        if (this.sid !== null) {
+            bodyWrap.attrs({sid: this.sid});
+        }
+
+        return bodyWrap;
+    },
+
+
+    /** PrivateFunction: _onDisconnectTimeout
+     *  _Private_ timeout handler for handling non-graceful disconnection.
+     *
+     */
+    _onDisconnectTimeout: function ()
+    {
+        // cancel all remaining requests and clear the queue
+        var req;
+        while (this._requests.length > 0) {
+            req = this._requests.pop();
+            req.abort = true;
+            req.xhr.abort();
+            // jslint complains, but this is fine. setting to empty func
+            // is necessary for IE6
+            req.xhr.onreadystatechange = function () {};
+        }
+    },
+
+    /**
+     *
+     */
+    _onIdle: function () {
+        var data = this._c._data;
+
+        // if no requests are in progress, poll
+        if (this._c.authenticated && this._requests.length === 0 &&
+            data.length === 0 && !this._c.disconnecting) {
+            Strophe.info("no requests during idle cycle, sending " +
+                         "blank request");
+            data.push(null);
+        }
+
+        if (this._requests.length < 2 && data.length > 0 &&
+            !this._c.paused) {
             body = this._buildBody();
-            for (i = 0; i < this._data.length; i++) {
-                if (this._data[i] !== null) {
-                    if (this._data[i] === "restart") {
+            for (i = 0; i < data.length; i++) {
+                if (data[i] !== null) {
+                    if (data[i] === "restart") {
                         body.attrs({
-                            to: this.domain,
+                            to: this._c.domain,
                             "xml:lang": "en",
                             "xmpp:restart": "true",
                             "xmlns:xmpp": Strophe.NS.BOSH
                         });
                     } else {
-                        body.cnode(this._data[i]).up();
+                        body.cnode(data[i]).up();
                     }
                 }
             }
-            delete this._data;
-            this._data = [];
+            delete this._c._data;
+            this._c._data = [];
             this._requests.push(
                 new Strophe.Request(body.tree(),
                                     this._onRequestStateChange.bind(
-                                        this, this._dataRecv.bind(this)),
+                                        this, this._c._dataRecv.bind(this._c)),
                                     body.tree().getAttribute("rid")));
             this._processRequest(this._requests.length - 1);
         }
@@ -3616,12 +3325,602 @@ Strophe.Connection.prototype = {
                 this._throttledRequestHandler();
             }
         }
+    },
 
-        clearTimeout(this._idleTimeout);
+    /** PrivateFunction: _removeRequest
+     *  _Private_ function to remove a request from the queue.
+     *
+     *  Parameters:
+     *    (Strophe.Request) req - The request to remove.
+     */
+    _removeRequest: function (req)
+    {
+        Strophe.debug("removing request");
 
-        // reactivate the timer only if connected
-        if (this.connected) {
-            this._idleTimeout = setTimeout(this._onIdle.bind(this), 100);
+        var i;
+        for (i = this._requests.length - 1; i >= 0; i--) {
+            if (req == this._requests[i]) {
+                this._requests.splice(i, 1);
+            }
+        }
+
+        // IE6 fails on setting to null, so set to empty function
+        req.xhr.onreadystatechange = function () {};
+
+        this._throttledRequestHandler();
+    },
+
+    /** PrivateFunction: _restartRequest
+     *  _Private_ function to restart a request that is presumed dead.
+     *
+     *  Parameters:
+     *    (Integer) i - The index of the request in the queue.
+     */
+    _restartRequest: function (i)
+    {
+        var req = this._requests[i];
+        if (req.dead === null) {
+            req.dead = new Date();
+        }
+
+        this._processRequest(i);
+    },
+
+    /** PrivateFunction: _processRequest
+     *  _Private_ function to process a request in the queue.
+     *
+     *  This function takes requests off the queue and sends them and
+     *  restarts dead requests.
+     *
+     *  Parameters:
+     *    (Integer) i - The index of the request in the queue.
+     */
+    _processRequest: function (i)
+    {
+        var req = this._requests[i];
+        var reqStatus = -1;
+
+        try {
+            if (req.xhr.readyState == 4) {
+                reqStatus = req.xhr.status;
+            }
+        } catch (e) {
+            Strophe.error("caught an error in _requests[" + i +
+                          "], reqStatus: " + reqStatus);
+        }
+
+        if (typeof(reqStatus) == "undefined") {
+            reqStatus = -1;
+        }
+
+        // make sure we limit the number of retries
+        if (req.sends > this.maxRetries) {
+            this._onDisconnectTimeout();
+            return;
+        }
+
+        var time_elapsed = req.age();
+        var primaryTimeout = (!isNaN(time_elapsed) &&
+                              time_elapsed > Math.floor(Strophe.TIMEOUT * this.wait));
+        var secondaryTimeout = (req.dead !== null &&
+                                req.timeDead() > Math.floor(Strophe.SECONDARY_TIMEOUT * this.wait));
+        var requestCompletedWithServerError = (req.xhr.readyState == 4 &&
+                                               (reqStatus < 1 ||
+                                                reqStatus >= 500));
+        if (primaryTimeout || secondaryTimeout ||
+            requestCompletedWithServerError) {
+            if (secondaryTimeout) {
+                Strophe.error("Request " +
+                              this._requests[i].id +
+                              " timed out (secondary), restarting");
+            }
+            req.abort = true;
+            req.xhr.abort();
+            // setting to null fails on IE6, so set to empty function
+            req.xhr.onreadystatechange = function () {};
+            this._requests[i] = new Strophe.Request(req.xmlData,
+                                                    req.origFunc,
+                                                    req.rid,
+                                                    req.sends);
+            req = this._requests[i];
+        }
+
+        if (req.xhr.readyState === 0) {
+            Strophe.debug("request id " + req.id +
+                          "." + req.sends + " posting");
+
+            try {
+                var async = !('sync' in this._c && this._c.sync === true);
+                req.xhr.open("POST", this._c.service, async);
+            } catch (e2) {
+                Strophe.error("XHR open failed.");
+                if (!this._c.connected) {
+                    this._c._changeConnectStatus(Strophe.Status.CONNFAIL,
+                                              "bad-service");
+                }
+                this._c.disconnect();
+                return;
+            }
+
+            // Fires the XHR request -- may be invoked immediately
+            // or on a gradually expanding retry window for reconnects
+            var sendFunc = function () {
+                req.date = new Date();
+                req.xhr.send(req.data);
+            };
+
+            // Implement progressive backoff for reconnects --
+            // First retry (send == 1) should also be instantaneous
+            if (req.sends > 1) {
+                // Using a cube of the retry number creates a nicely
+                // expanding retry window
+                var backoff = Math.min(Math.floor(Strophe.TIMEOUT * this.wait),
+                                       Math.pow(req.sends, 3)) * 1000;
+                setTimeout(sendFunc, backoff);
+            } else {
+                sendFunc();
+            }
+
+            req.sends++;
+
+            if (this._c.xmlOutput !== Strophe.Connection.prototype.xmlOutput) {
+                this._c.xmlOutput(req.xmlData);
+            }
+            if (this._c.rawOutput !== Strophe.Connection.prototype.rawOutput) {
+                this._c.rawOutput(req.data);
+            }
+        } else {
+            Strophe.debug("_processRequest: " +
+                          (i === 0 ? "first" : "second") +
+                          " request has readyState of " +
+                          req.xhr.readyState);
+        }
+    },
+
+    /** PrivateFunction: _throttledRequestHandler
+     *  _Private_ function to throttle requests to the connection window.
+     *
+     *  This function makes sure we don't send requests so fast that the
+     *  request ids overflow the connection window in the case that one
+     *  request died.
+     */
+    _throttledRequestHandler: function ()
+    {
+        if (!this._requests) {
+            Strophe.debug("_throttledRequestHandler called with " +
+                          "undefined requests");
+        } else {
+            Strophe.debug("_throttledRequestHandler called with " +
+                          this._requests.length + " requests");
+        }
+
+        if (!this._requests || this._requests.length === 0) {
+            return;
+        }
+
+        if (this._requests.length > 0) {
+            this._processRequest(0);
+        }
+
+        if (this._requests.length > 1 &&
+            Math.abs(this._requests[0].rid -
+                     this._requests[1].rid) < this.window) {
+            this._processRequest(1);
+        }
+    },
+
+    /** PrivateFunction: _onRequestStateChange
+     *  _Private_ handler for Strophe.Request state changes.
+     *
+     *  This function is called when the XMLHttpRequest readyState changes.
+     *  It contains a lot of error handling logic for the many ways that
+     *  requests can fail, and calls the request callback when requests
+     *  succeed.
+     *
+     *  Parameters:
+     *    (Function) func - The handler for the request.
+     *    (Strophe.Request) req - The request that is changing readyState.
+     */
+    _onRequestStateChange: function (func, req)
+    {
+        Strophe.debug("request id " + req.id +
+                      "." + req.sends + " state changed to " +
+                      req.xhr.readyState);
+
+        if (req.abort) {
+            req.abort = false;
+            return;
+        }
+
+        // request complete
+        var reqStatus;
+        if (req.xhr.readyState == 4) {
+            reqStatus = 0;
+            try {
+                reqStatus = req.xhr.status;
+            } catch (e) {
+                // ignore errors from undefined status attribute.  works
+                // around a browser bug
+            }
+
+            if (typeof(reqStatus) == "undefined") {
+                reqStatus = 0;
+            }
+
+            if (this.disconnecting) {
+                if (reqStatus >= 400) {
+                    this._hitError(reqStatus);
+                    return;
+                }
+            }
+
+            var reqIs0 = (this._requests[0] == req);
+            var reqIs1 = (this._requests[1] == req);
+
+            if ((reqStatus > 0 && reqStatus < 500) || req.sends > 5) {
+                // remove from internal queue
+                this._removeRequest(req);
+                Strophe.debug("request id " +
+                              req.id +
+                              " should now be removed");
+            }
+
+            // request succeeded
+            if (reqStatus == 200) {
+                // if request 1 finished, or request 0 finished and request
+                // 1 is over Strophe.SECONDARY_TIMEOUT seconds old, we need to
+                // restart the other - both will be in the first spot, as the
+                // completed request has been removed from the queue already
+                if (reqIs1 ||
+                    (reqIs0 && this._requests.length > 0 &&
+                     this._requests[0].age() > Math.floor(Strophe.SECONDARY_TIMEOUT * this.wait))) {
+                    this._restartRequest(0);
+                }
+                // call handler
+                Strophe.debug("request id " +
+                              req.id + "." +
+                              req.sends + " got 200");
+                func(req);
+                this.errors = 0;
+            } else {
+                Strophe.error("request id " +
+                              req.id + "." +
+                              req.sends + " error " + reqStatus +
+                              " happened");
+                if (reqStatus === 0 ||
+                    (reqStatus >= 400 && reqStatus < 600) ||
+                    reqStatus >= 12000) {
+                    this._hitError(reqStatus);
+                    if (reqStatus >= 400 && reqStatus < 500) {
+                        this._c._changeConnectStatus(Strophe.Status.DISCONNECTING,
+                                                  null);
+                        this._c._doDisconnect();
+                    }
+                }
+            }
+
+            if (!((reqStatus > 0 && reqStatus < 500) ||
+                  req.sends > 5)) {
+                this._throttledRequestHandler();
+            }
+        }
+    },
+
+    /** PrivateFunction: _hitError
+     *  _Private_ function to handle the error count.
+     *
+     *  Requests are resent automatically until their error count reaches
+     *  5.  Each time an error is encountered, this function is called to
+     *  increment the count and disconnect if the count is too high.
+     *
+     *  Parameters:
+     *    (Integer) reqStatus - The request status.
+     */
+    _hitError: function (reqStatus)
+    {
+        this.errors++;
+        Strophe.warn("request errored, status: " + reqStatus +
+                     ", number of errors: " + this.errors);
+        if (this.errors > 4) {
+            this._onDisconnectTimeout();
+        }
+    },
+
+    /** PrivateFunction: _sendRestart
+     *  Send an xmpp:restart stanza.
+     */
+    _sendRestart: function ()
+    {
+        this._throttledRequestHandler();
+        clearTimeout(this._c._idleTimeout);
+    },
+
+    disconnect: function (pres)
+    {
+        this._sendTerminate(pres);
+    },
+
+    /** PrivateFunction: _doDisconnect
+     *  _Private_ function to disconnect.
+     *
+     */
+    _doDisconnect: function ()
+    {
+        this.sid = null;
+        this.rid = Math.floor(Math.random() * 4294967295);
+    },
+
+    emptyQueue: function ()
+    {
+        return this._requests.length === 0;
+    },
+
+    reqToData: function (req)
+    {
+        try {
+            return req.getResponse();
+        } catch (e) {
+            if (e != "parsererror") { throw e; }
+            this._c.disconnect("strophe-parsererror");
+        }
+    },
+
+    /** PrivateFunction: _sendTerminate
+     *  _Private_ function to send initial disconnect sequence.
+     *
+     *  This is the first step in a graceful disconnect.  It sends
+     *  the BOSH server a terminate body and includes an unavailable
+     *  presence if authentication has completed.
+     */
+    _sendTerminate: function (pres)
+    {
+        Strophe.info("_sendTerminate was called");
+        var body = this._buildBody().attrs({type: "terminate"});
+
+        if (pres) {
+            body.cnode(pres.tree());
+        }
+
+        var req = new Strophe.Request(body.tree(),
+                                      this._onRequestStateChange.bind(
+                                          this, this._c._dataRecv.bind(this._c)),
+                                      body.tree().getAttribute("rid"));
+
+        this._requests.push(req);
+        this._throttledRequestHandler();
+    },
+
+    /** PrivateFunction: _connect_cb
+     *  _Private_ handler for initial connection request.
+     *
+     *  This handler is used to process the Bosh-part of the initial request.
+     *  Parameters:
+     *    (Strophe.Request) bodyWrap - The received stanza.
+     */
+    _connect_cb: function (bodyWrap)
+    {
+        var typ = bodyWrap.getAttribute("type");
+        var cond, conflict;
+        if (typ !== null && typ == "terminate") {
+            // an error occurred
+            cond = bodyWrap.getAttribute("condition");
+            conflict = bodyWrap.getElementsByTagName("conflict");
+            if (cond !== null) {
+                if (cond == "remote-stream-error" && conflict.length > 0) {
+                    cond = "conflict";
+                }
+                this._c._changeConnectStatus(Strophe.Status.CONNFAIL, cond);
+            } else {
+                this._c._changeConnectStatus(Strophe.Status.CONNFAIL, "unknown");
+            }
+            return;
+        }
+
+        // check to make sure we don't overwrite these if _connect_cb is
+        // called multiple times in the case of missing stream:features
+        if (!this.sid) {
+            this.sid = bodyWrap.getAttribute("sid");
+        }
+        if (!this.stream_id) {
+            this.stream_id = bodyWrap.getAttribute("authid");
+        }
+        var wind = bodyWrap.getAttribute('requests');
+        if (wind) { this.window = parseInt(wind, 10); }
+        var hold = bodyWrap.getAttribute('hold');
+        if (hold) { this.hold = parseInt(hold, 10); }
+        var wait = bodyWrap.getAttribute('wait');
+        if (wait) { this.wait = parseInt(wait, 10); }
+    }
+};
+
+Strophe.Websocket = function(connection) {
+    this._c = connection;
+};
+
+Strophe.Websocket.prototype = {
+    /** PrivateFunction: _onError
+     * _Private_ function to handle websockets errors.
+     *
+     * Parameters:
+     * () error - The websocket error.
+     */
+    _onError: function(error) {
+        Strophe.log("Websocket error " + error);
+    },
+
+    /** PrivateFunction: _onOpen
+     * _Private_ function to handle websockets connections.
+     *
+     */
+    _onOpen: function() {
+        Strophe.log("Websocket open");
+        var start = this._buildStream();
+        this._c.xmlOutput(start);
+        var startString = Strophe.serialize(start);
+        this._c.rawOutput(startString);
+        this.socket.send(startString);
+    },
+
+    /** PrivateFunction: _onClose
+     * _Private_ function to handle websockets closing.
+     *
+     */
+    _onClose: function(event) {
+        Strophe.log("Websocket disconnected");
+        this._c._doDisconnect();
+    },
+
+    /** PrivateFunction: _onMessage
+     * _Private_ function to handle websockets messages.
+     *
+     * This function parses each of the messages as if they are full documents. [TODO : We may actually want to use a SAX Push parser].
+     *
+     * Since all XMPP traffic starts with "<stream:stream version='1.0' xml:lang='en' xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' id='3697395463' from='SERVER'>"
+     * The first stanza will always fail to be parsed...
+     * Addtionnaly, the seconds stanza will always be a <stream:features> with the stream NS defined in the previous stanza... so we need to 'force' the inclusion of the NS in this stanza!
+     *
+     * Parameters:
+     * (string) message - The websocket message.
+     */
+    _onMessage: function(message) {
+        if (message.data === "</stream:stream>") {
+            this.disconnect();
+            return;
+        }
+        var string = message.data.replace(/^<stream:([a-z]*)>/, "<stream:$1 xmlns:stream='http://etherx.jabber.org/streams'>");
+
+        parser = new DOMParser();
+        var elem = parser.parseFromString(string, "text/xml").documentElement;
+
+        var elem = this._c._bodyWrap(elem).tree();
+
+        this._c._dataRecv(elem);
+    },
+
+    /** PrivateFunction: _connect_cb_wrapper
+     * _Private_ function that handles the first connection messages
+     */
+    _connect_cb_wrapper: function(message) {
+        var string = message.data.replace(/^<stream:([a-z]*)>/, "<stream:$1 xmlns:stream='http://etherx.jabber.org/streams'>");;
+
+        var parser = new DOMParser();
+        var elem = parser.parseFromString(string, "text/xml").documentElement;
+
+        if (elem.nodeName != "stream:stream") {
+            this.socket.onmessage = this._onMessage.bind(this);
+            elem = this._c._bodyWrap(elem).tree();
+            this._c._connect_cb(elem);
+        } else {
+            this._c.xmlInput(elem);
+            this._c.rawInput(Strophe.serialize(elem));
+        }
+    },
+
+    /** PrivateFunction: _connect_cb
+     * _Private_ function stub that gets called by the connection
+     * in _connect_cb
+     */
+    _connect_cb: function() {},
+
+    connect: function () {
+        if(!this.socket) {
+            this.socket = new WebSocket(this._c.service, "xmpp");
+            this.socket.onopen = this._onOpen.bind(this);
+            this.socket.onerror = this._onError.bind(this);
+            this.socket.onclose = this._onClose.bind(this);
+            this.socket.onmessage = this._connect_cb_wrapper.bind(this);
+        }
+    },
+
+    send: function () {
+        this._c.flush();
+    },
+
+    /** PrivateFunction: _sendRestart
+     *  Send an xmpp:restart stanza.
+     */
+    _sendRestart: function ()
+    {
+        clearTimeout(this._c._idleTimeout);
+        this._c._onIdle.bind(this._c)();
+    },
+
+    /** PrivateFunction: _doDisconnect
+     *  _Private_ function to disconnect.
+     *
+     */
+    _doDisconnect: function ()
+    {
+        this.socket = null;
+    },
+
+    disconnect: function (pres)
+    {
+        if (this.socket.readyState !== WebSocket.CLOSED) {
+            if (pres) {
+                this._c.send(pres);
+            }
+            var close = '</stream:stream>';
+            this._c.xmlOutput(close);
+            this._c.rawOutput(close);
+            try {
+                this.socket.send(close);
+            } catch (e) {}
+            this.socket.close();
+        }
+    },
+
+    emptyQueue: function ()
+    {
+        return true;
+    },
+
+    reqToData: function (req)
+    {
+        return req;
+    },
+
+    /** PrivateFunction: _buildStream
+     *  _Private_ helper function to generate the <stream> start tag for WebSockets
+     *
+     *  Returns:
+     *    A Strophe.Builder with a <stream> element.
+     */
+    _buildStream: function ()
+    {
+        return $build("stream:stream", {
+            "to": this._c.domain,
+            "xmlns": Strophe.NS.CLIENT,
+            "xmlns:stream": Strophe.NS.STREAM,
+            "version": '1.0'
+        });
+    },
+
+    /** PrivateFunction: _onDisconnectTimeout
+     *  _Private_ timeout handler for handling non-graceful disconnection.
+     *
+     */
+    _onDisconnectTimeout: function () {},
+
+    /**
+     *
+     */
+    _onIdle: function () {
+        var data = this._c._data;
+        if (data.length > 0 && !this._c.paused) {
+            for (i = 0; i < data.length; i++) {
+                if (data[i] !== null) {
+                    if (data[i] === "restart") {
+                        var stanza = this._buildStream();
+                    } else {
+                        var stanza = data[i];
+                    }
+                    this._c.xmlOutput(stanza);
+                    this._c.rawOutput(Strophe.serialize(stanza));
+                    this.socket.send(Strophe.serialize(stanza));
+                }
+            }
+            this._c._data = [];
         }
     }
 };
