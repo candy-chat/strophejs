@@ -552,6 +552,8 @@ Strophe = {
      */
     xmlTextNode: function (text)
     {
+        //ensure text is escaped
+        text = Strophe.xmlescape(text);
         return Strophe.xmlGenerator().createTextNode(text);
     },
 
